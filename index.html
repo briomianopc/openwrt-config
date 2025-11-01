@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>OpenWrt Config Generator (Dev)</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        body { font-family: sans-serif; }
+        ul { list-style-type: none; padding-left: 20px; }
+        li { margin: 5px 0; }
+        .disabled-prompt { color: #999; }
+        .help-text { font-size: 0.9em; color: #555; margin-left: 20px; }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <h1>OpenWrt 配置生成器 (Dev)</h1>
+    <p>这是一个开发原型，用于展示前端逻辑。</p>
+
+    <input type="text" placeholder="搜索配置项..." style="width: 300px;">
+    <hr>
+
+    <menu-tree :nodes="menuTree"></menu-tree>
+
+    <hr>
+    <button @click="generateConfig">生成 .config 文件</button>
+
+    <h3>当前配置状态 (Debug):</h3>
+    <pre>{{ configState }}</pre>
+</div>
+
+<script type="text/x-template" id="menu-tree-template">
+    <ul>
+        <li v-for="node in nodes" :key="node.id || node.name">
+            <div v-if="node.id">
+                <label :class="{ 'disabled-prompt': isItemDisabled(node) }">
+                    <input 
+                        type="checkbox" 
+                        v-if="node.type === 'bool'"
+                        v-model="configState[node.id]"
+                        :disabled="isItemDisabled(node)">
+                    
+                    {{ node.prompt }} (<code>{{ node.id }}</code>)
+                </label>
+                <div class="help-text" v-if="node.help">{{ node.help.substring(0, 100) }}...</div>
+            </div>
+
+            <div v-if="node.name">
+                <strong>{{ node.name }}</strong>
+                <menu-tree :nodes="node.children"></menu-tree>
+            </div>
+        </li>
+    </ul>
+</script>
+
+
+<script>
+// ==========================================================
+// Vue App 实例
+// ==========================================================
+const { createApp, ref, computed, onMounted } = Vue;
+
+const app = createApp({
+    setup() {
+        // --- 状态 (State) ---
+        // 原始的 Kconfig 列表
+        const allOptions = ref([]); 
+        // 用户选择的状态 { "CONFIG_A": true, "CONFIG_B": false, ... }
+        const configState = ref({});
+        
+        // --- 模拟的 menu.json ---
+        // 在生产环境中, 你会用 fetch('./menu.json') 来加载
+        const MOCK_MENU_JSON = [
+            { "id": "CONFIG_TARGET_x86_64", "type": "bool", "prompt": "Target x86_64", "help": "编译x86架构", "depends_on": "", "menu_path": ["Target"] },
+            { "id": "CONFIG_TARGET_ROOTFS_EXT4", "type": "bool", "prompt": "Build ext4 rootfs", "help": "", "depends_on": "CONFIG_TARGET_x86_64", "menu_path": ["Target", "Filesystems"] },
+            { "id": "CONFIG_PACKAGE_luci", "type": "bool", "prompt": "Build LuCI Web UI", "help": "LuCI 界面", "depends_on": "", "menu_path": ["LuCI", "Applications"] },
+            { "id": "CONFIG_PACKAGE_luci_app_firewall", "type": "bool", "prompt": "LuCI Firewall App", "help": "防火墙界面", "depends_on": "CONFIG_PACKAGE_luci", "menu_path": ["LuCI", "Applications"] }
+        ];
+
+        // --- 计算属性 (Computed) ---
+        // 将扁平的列表转换为树形结构, 供前端渲染
+        const menuTree = computed(() => {
+            const tree = {}; // { "Target": { "name": "Target", "children": [...] } }
+            
+            for (const option of allOptions.value) {
+                let currentLevel = tree;
+                
+                // 1. 创建菜单路径
+                for (const pathName of option.menu_path) {
+                    if (!currentLevel[pathName]) {
+                        currentLevel[pathName] = { "name": pathName, "children": [] };
+                    }
+                    // 注意: children 既可以包含菜单, 也可以包含叶子节点
+                    // 我们需要一个更好的方法来区分, 这里简化处理
+                    currentLevel = currentLevel[pathName].children; 
+                }
+                
+                // 2. 将选项本身(叶子)添加到树中
+                // 这是一个简化的构建树, 生产环境需要更健壮的算法
+                if (Array.isArray(currentLevel)) {
+                     currentLevel.push(option);
+                }
+            }
+            
+            // 返回根节点的列表
+            return Object.values(tree);
+        });
+
+        // --- 生命周期函数 ---
+        onMounted(() => {
+            // 在生产中:
+            // fetch('./menu.json').then(res => res.json()).then(data => {
+            //     allOptions.value = data;
+            //     initializeConfigState(data);
+            // });
+            
+            // 开发中 (使用模拟数据):
+            allOptions.value = MOCK_MENU_JSON;
+            initializeConfigState(MOCK_MENU_JSON);
+        });
+
+        // --- 方法 (Methods) ---
+        function initializeConfigState(options) {
+            const state = {};
+            for (const opt of options) {
+                // 在这里可以设置默认值 (来自 opt.default)
+                // 为简单起见, 先都设为 false
+                state[opt.id] = false;
+            }
+            configState.value = state;
+        }
+
+        // 核心逻辑: 检查一个选项是否应该被禁用
+        function isItemDisabled(node) {
+            // 这是一个极简的依赖解析, 仅用于演示
+            // 它只检查一个依赖项
+            if (node.depends_on && !configState.value[node.depends_on]) {
+                return true; // 依赖项未被选中, 禁用
+            }
+            return false;
+        }
+
+        // 提交到后端
+        async function generateConfig() {
+            console.log("正在生成配置:", configState.value);
+            
+            // 过滤掉值为 false 的选项
+            const finalConfig = {};
+            for (const key in configState.value) {
+                if (configState.value[key]) {
+                    finalConfig[key] = "y"; // Kconfig 使用 'y'
+                }
+            }
+            
+            try {
+                const response = await fetch('http://127.0.0.1:5000/generate-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(finalConfig)
+                });
+                
+                if (!response.ok) {
+                    throw new Error('后端 API 错误: ' + await response.text());
+                }
+
+                // 触发下载
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = '.config';
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                alert('配置已生成!');
+
+            } catch (error) {
+                console.error(error);
+                alert('生成失败: ' + error.message);
+            }
+        }
+
+        return {
+            configState,
+            menuTree,
+            isItemDisabled,
+            generateConfig
+        };
+    }
+});
+
+// ==========================================================
+// 注册递归组件
+// ==========================================================
+app.component('menu-tree', {
+    name: 'menu-tree',
+    props: ['nodes'],
+    template: '#menu-tree-template',
+    // 在组件内部也需要访问全局状态和方法
+    setup() {
+        // 从父组件注入 (或者使用 Pinia)
+        // 这是一个简化的方法, 假设 configState 和 isItemDisabled 在根组件上
+        const root = app._instance.setupState; 
+        return {
+            configState: root.configState,
+            isItemDisabled: root.isItemDisabled
+        };
+    }
+});
+
+// 挂载 App
+app.mount('#app');
+
+</script>
+</body>
+</html>
