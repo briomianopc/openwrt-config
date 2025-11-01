@@ -1,0 +1,152 @@
+[
+  {
+    "id": "CONFIG_TARGET_x86",
+    "type": "bool",
+    "prompt": "x86 architecture",
+    "help": "Build firmware for x86 based systems",
+    "depends_on": "y",
+    "selects": ["CONFIG_ARCH_X86"],
+    "default": [],
+    "menu_path": ["Target", "Architecture"]
+  },
+  {
+    "id": "CONFIG_ARCH_X86",
+    "type": "bool",
+    "prompt": "x86 CPU support",
+    "help": "Internal x86 architecture support",
+    "depends_on": "y",
+    "selects": [],
+    "default": ["n"],
+    "menu_path": ["Target", "Architecture", "CPU"]
+  },
+  {
+    "id": "CONFIG_TARGET_x86_64",
+    "type": "bool",
+    "prompt": "x86_64 (64-bit)",
+    "help": "Build for 64-bit x86 systems",
+    "depends_on": "CONFIG_TARGET_x86",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Target", "Architecture"]
+  },
+  {
+    "id": "CONFIG_TARGET_ROOTFS_EXT4",
+    "type": "bool",
+    "prompt": "ext4 root filesystem",
+    "help": "Build ext4 root filesystem image",
+    "depends_on": "CONFIG_TARGET_x86_64",
+    "selects": ["CONFIG_PACKAGE_e2fsprogs"],
+    "default": [],
+    "menu_path": ["Target", "Filesystems"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_e2fsprogs",
+    "type": "bool",
+    "prompt": "e2fsprogs utilities",
+    "help": "Ext2/3/4 filesystem utilities",
+    "depends_on": "y",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Base system", "Filesystem"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_luci",
+    "type": "bool",
+    "prompt": "LuCI Web Interface",
+    "help": "Web configuration interface for OpenWrt",
+    "depends_on": "y",
+    "selects": ["CONFIG_PACKAGE_uhttpd", "CONFIG_PACKAGE_lua"],
+    "default": [],
+    "menu_path": ["LuCI", "Collections"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_uhttpd",
+    "type": "bool",
+    "prompt": "uHTTPd web server",
+    "help": "Lightweight HTTP server",
+    "depends_on": "y",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Network", "Web Servers"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_lua",
+    "type": "bool",
+    "prompt": "Lua interpreter",
+    "help": "Lua scripting language",
+    "depends_on": "y",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Languages", "Lua"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_luci_app_firewall",
+    "type": "bool",
+    "prompt": "LuCI Firewall Application",
+    "help": "Web interface for firewall configuration",
+    "depends_on": "CONFIG_PACKAGE_luci",
+    "selects": ["CONFIG_PACKAGE_firewall"],
+    "default": [],
+    "menu_path": ["LuCI", "Applications"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_firewall",
+    "type": "bool",
+    "prompt": "Firewall",
+    "help": "Firewall package",
+    "depends_on": "y",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Network", "Firewall"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_luci_app_vpn",
+    "type": "bool",
+    "prompt": "LuCI VPN Application",
+    "help": "Web interface for VPN configuration",
+    "depends_on": "CONFIG_PACKAGE_luci && CONFIG_PACKAGE_openvpn",
+    "selects": [],
+    "default": [],
+    "menu_path": ["LuCI", "Applications"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_openvpn",
+    "type": "bool",
+    "prompt": "OpenVPN",
+    "help": "VPN solution using SSL/TLS",
+    "depends_on": "y",
+    "selects": ["CONFIG_PACKAGE_openssl"],
+    "default": [],
+    "menu_path": ["Network", "VPN"]
+  },
+  {
+    "id": "CONFIG_PACKAGE_openssl",
+    "type": "bool",
+    "prompt": "OpenSSL library",
+    "help": "SSL/TLS cryptographic library",
+    "depends_on": "y",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Libraries", "SSL"]
+  },
+  {
+    "id": "CONFIG_KERNEL_DEBUG",
+    "type": "bool",
+    "prompt": "Kernel debugging",
+    "help": "Enable kernel debugging features",
+    "depends_on": "y",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Kernel", "Debug"]
+  },
+  {
+    "id": "CONFIG_ADVANCED_FEATURES",
+    "type": "bool",
+    "prompt": "Advanced Features",
+    "help": "Enable advanced configuration options",
+    "depends_on": "(CONFIG_TARGET_x86 || CONFIG_TARGET_x86_64) && !CONFIG_KERNEL_DEBUG",
+    "selects": [],
+    "default": [],
+    "menu_path": ["Advanced"]
+  }
+]
