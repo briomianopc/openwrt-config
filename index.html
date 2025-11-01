@@ -5,11 +5,14 @@
     <title>OpenWrt Config Generator (Dev)</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <style>
-        body { font-family: sans-serif; }
+        body { font-family: sans-serif; padding: 20px; }
         ul { list-style-type: none; padding-left: 20px; }
         li { margin: 5px 0; }
         .disabled-prompt { color: #999; }
         .help-text { font-size: 0.9em; color: #555; margin-left: 20px; }
+        .locked-selection { color: #2196F3; font-style: italic; }
+        .loading { text-align: center; padding: 40px; font-size: 1.2em; color: #666; }
+        .error { color: red; padding: 20px; border: 2px solid red; margin: 20px 0; }
     </style>
 </head>
 <body>
@@ -18,32 +21,43 @@
     <h1>OpenWrt 配置生成器 (Dev)</h1>
     <p>这是一个开发原型，用于展示前端逻辑。</p>
 
-    <input type="text" placeholder="搜索配置项..." style="width: 300px;">
-    <hr>
+    <div v-if="loading" class="loading">
+        正在加载配置选项...
+    </div>
 
-    <menu-tree :nodes="menuTree"></menu-tree>
+    <div v-else-if="error" class="error">
+        <strong>加载失败:</strong> {{ error }}
+    </div>
 
-    <hr>
-    <button @click="generateConfig">生成 .config 文件</button>
+    <template v-else>
+        <input type="text" placeholder="搜索配置项..." style="width: 300px;">
+        <hr>
 
-    <h3>当前配置状态 (Debug):</h3>
-    <pre>{{ configState }}</pre>
+        <menu-tree :nodes="menuTree"></menu-tree>
+
+        <hr>
+        <button @click="generateConfig">生成 .config 文件</button>
+
+        <h3>当前配置状态 (Debug):</h3>
+        <pre>{{ JSON.stringify(getActiveConfig(), null, 2) }}</pre>
+    </template>
 </div>
 
 <script type="text/x-template" id="menu-tree-template">
     <ul>
         <li v-for="node in nodes" :key="node.id || node.name">
             <div v-if="node.id">
-                <label :class="{ 'disabled-prompt': isItemDisabled(node) }">
+                <label :class="{ 'disabled-prompt': isItemDisabled(node), 'locked-selection': isItemLocked(node) }">
                     <input 
                         type="checkbox" 
                         v-if="node.type === 'bool'"
                         v-model="configState[node.id]"
-                        :disabled="isItemDisabled(node)">
+                        :disabled="isItemDisabled(node) || isItemLocked(node)">
                     
                     {{ node.prompt }} (<code>{{ node.id }}</code>)
+                    <span v-if="isItemLocked(node)" style="color: #2196F3;"> [自动选择]</span>
                 </label>
-                <div class="help-text" v-if="node.help">{{ node.help.substring(0, 100) }}...</div>
+                <div class="help-text" v-if="node.help">{{ node.help.substring(0, 150) }}...</div>
             </div>
 
             <div v-if="node.name">
@@ -57,91 +71,391 @@
 
 <script>
 // ==========================================================
+// Kconfig 表达式解析器
+// ==========================================================
+class KconfigExpressionParser {
+    constructor(configState) {
+        this.configState = configState;
+    }
+
+    /**
+     * 解析并求值一个 Kconfig 依赖表达式
+     * 例如: "(CONFIG_A && CONFIG_B) || CONFIG_C"
+     * @param {string} expr - 依赖表达式
+     * @returns {boolean} - 表达式的求值结果
+     */
+    evaluate(expr) {
+        if (!expr || expr === '' || expr === 'y') {
+            return true; // 无依赖或永真
+        }
+        if (expr === 'n') {
+            return false; // 永假
+        }
+
+        try {
+            // 词法分析: 将表达式拆分为 token
+            const tokens = this.tokenize(expr);
+            // 语法分析: 将 token 转换为后缀表达式 (逆波兰表示法)
+            const postfix = this.infixToPostfix(tokens);
+            // 求值: 计算后缀表达式
+            return this.evaluatePostfix(postfix);
+        } catch (error) {
+            console.warn(`Failed to parse expression: "${expr}"`, error);
+            return true; // 解析失败时默认允许
+        }
+    }
+
+    /**
+     * 词法分析: 将表达式字符串拆分为 token 数组
+     */
+    tokenize(expr) {
+        const tokens = [];
+        let current = '';
+        
+        for (let i = 0; i < expr.length; i++) {
+            const char = expr[i];
+            
+            if (char === ' ' || char === '\t' || char === '\n') {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+            } else if (char === '(' || char === ')') {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+                tokens.push(char);
+            } else if (char === '&' && expr[i + 1] === '&') {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+                tokens.push('&&');
+                i++; // 跳过下一个 '&'
+            } else if (char === '|' && expr[i + 1] === '|') {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+                tokens.push('||');
+                i++; // 跳过下一个 '|'
+            } else if (char === '!') {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+                tokens.push('!');
+            } else if (char === '=' || char === '<' || char === '>') {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+                // 处理 !=, ==, <=, >= 等比较运算符
+                if (expr[i + 1] === '=') {
+                    tokens.push(char + '=');
+                    i++;
+                } else {
+                    tokens.push(char);
+                }
+            } else {
+                current += char;
+            }
+        }
+        
+        if (current) {
+            tokens.push(current);
+        }
+        
+        return tokens;
+    }
+
+    /**
+     * 将中缀表达式转换为后缀表达式 (调度场算法)
+     */
+    infixToPostfix(tokens) {
+        const output = [];
+        const operators = [];
+        const precedence = {
+            '!': 4,
+            '==': 3, '!=': 3, '<': 3, '>': 3, '<=': 3, '>=': 3,
+            '&&': 2,
+            '||': 1
+        };
+
+        for (const token of tokens) {
+            if (token === '(') {
+                operators.push(token);
+            } else if (token === ')') {
+                while (operators.length > 0 && operators[operators.length - 1] !== '(') {
+                    output.push(operators.pop());
+                }
+                operators.pop(); // 弹出 '('
+            } else if (precedence[token] !== undefined) {
+                // 运算符
+                while (
+                    operators.length > 0 &&
+                    operators[operators.length - 1] !== '(' &&
+                    precedence[operators[operators.length - 1]] >= precedence[token]
+                ) {
+                    output.push(operators.pop());
+                }
+                operators.push(token);
+            } else {
+                // 操作数 (变量或常量)
+                output.push(token);
+            }
+        }
+
+        while (operators.length > 0) {
+            output.push(operators.pop());
+        }
+
+        return output;
+    }
+
+    /**
+     * 求值后缀表达式
+     */
+    evaluatePostfix(postfix) {
+        const stack = [];
+
+        for (const token of postfix) {
+            if (token === '&&') {
+                const b = stack.pop();
+                const a = stack.pop();
+                stack.push(a && b);
+            } else if (token === '||') {
+                const b = stack.pop();
+                const a = stack.pop();
+                stack.push(a || b);
+            } else if (token === '!') {
+                const a = stack.pop();
+                stack.push(!a);
+            } else if (token === '==') {
+                const b = stack.pop();
+                const a = stack.pop();
+                stack.push(a === b);
+            } else if (token === '!=') {
+                const b = stack.pop();
+                const a = stack.pop();
+                stack.push(a !== b);
+            } else {
+                // 操作数: 求值
+                stack.push(this.evaluateOperand(token));
+            }
+        }
+
+        return stack.length > 0 ? stack[0] : true;
+    }
+
+    /**
+     * 求值单个操作数
+     */
+    evaluateOperand(operand) {
+        // Kconfig 常量
+        if (operand === 'y' || operand === 'Y') return true;
+        if (operand === 'n' || operand === 'N') return false;
+        if (operand === 'm' || operand === 'M') return false; // 模块视为未启用
+        
+        // 数字
+        if (/^\d+$/.test(operand)) {
+            return parseInt(operand, 10) !== 0;
+        }
+        
+        // 字符串字面量
+        if (operand.startsWith('"') && operand.endsWith('"')) {
+            return operand.slice(1, -1) !== '';
+        }
+        
+        // CONFIG 符号
+        if (operand.startsWith('CONFIG_')) {
+            return this.configState[operand] === true;
+        }
+        
+        // 其他未知符号，默认为 false
+        return false;
+    }
+}
+
+// ==========================================================
 // Vue App 实例
 // ==========================================================
-const { createApp, ref, computed, onMounted } = Vue;
+const { createApp, ref, computed, onMounted, watch, provide, inject } = Vue;
 
 const app = createApp({
     setup() {
         // --- 状态 (State) ---
-        // 原始的 Kconfig 列表
-        const allOptions = ref([]); 
-        // 用户选择的状态 { "CONFIG_A": true, "CONFIG_B": false, ... }
+        const allOptions = ref([]);
         const configState = ref({});
+        const lockedSelections = ref(new Set()); // 记录被自动选择的选项
+        const loading = ref(true);
+        const error = ref(null);
         
-        // --- 模拟的 menu.json ---
-        // 在生产环境中, 你会用 fetch('./menu.json') 来加载
-        const MOCK_MENU_JSON = [
-            { "id": "CONFIG_TARGET_x86_64", "type": "bool", "prompt": "Target x86_64", "help": "编译x86架构", "depends_on": "", "menu_path": ["Target"] },
-            { "id": "CONFIG_TARGET_ROOTFS_EXT4", "type": "bool", "prompt": "Build ext4 rootfs", "help": "", "depends_on": "CONFIG_TARGET_x86_64", "menu_path": ["Target", "Filesystems"] },
-            { "id": "CONFIG_PACKAGE_luci", "type": "bool", "prompt": "Build LuCI Web UI", "help": "LuCI 界面", "depends_on": "", "menu_path": ["LuCI", "Applications"] },
-            { "id": "CONFIG_PACKAGE_luci_app_firewall", "type": "bool", "prompt": "LuCI Firewall App", "help": "防火墙界面", "depends_on": "CONFIG_PACKAGE_luci", "menu_path": ["LuCI", "Applications"] }
-        ];
-
         // --- 计算属性 (Computed) ---
-        // 将扁平的列表转换为树形结构, 供前端渲染
+        // 将扁平的列表转换为树形结构
         const menuTree = computed(() => {
-            const tree = {}; // { "Target": { "name": "Target", "children": [...] } }
-            
+            if (allOptions.value.length === 0) {
+                return [];
+            }
+
+            // 使用 Map 来构建树结构
+            const rootNodes = [];
+            const pathMap = new Map(); // 路径 -> 节点的映射
+
             for (const option of allOptions.value) {
-                let currentLevel = tree;
+                const menuPath = option.menu_path || [];
                 
-                // 1. 创建菜单路径
-                for (const pathName of option.menu_path) {
-                    if (!currentLevel[pathName]) {
-                        currentLevel[pathName] = { "name": pathName, "children": [] };
-                    }
-                    // 注意: children 既可以包含菜单, 也可以包含叶子节点
-                    // 我们需要一个更好的方法来区分, 这里简化处理
-                    currentLevel = currentLevel[pathName].children; 
+                // 如果没有路径，放在根级别
+                if (menuPath.length === 0) {
+                    rootNodes.push(option);
+                    continue;
                 }
-                
-                // 2. 将选项本身(叶子)添加到树中
-                // 这是一个简化的构建树, 生产环境需要更健壮的算法
-                if (Array.isArray(currentLevel)) {
-                     currentLevel.push(option);
+
+                // 构建菜单路径
+                let currentPath = '';
+                let parentNode = null;
+
+                for (let i = 0; i < menuPath.length; i++) {
+                    const segment = menuPath[i];
+                    const nodePath = currentPath ? `${currentPath}/${segment}` : segment;
+
+                    if (!pathMap.has(nodePath)) {
+                        // 创建新的菜单节点
+                        const menuNode = {
+                            name: segment,
+                            children: [],
+                            isMenu: true
+                        };
+
+                        if (parentNode) {
+                            parentNode.children.push(menuNode);
+                        } else {
+                            rootNodes.push(menuNode);
+                        }
+
+                        pathMap.set(nodePath, menuNode);
+                    }
+
+                    parentNode = pathMap.get(nodePath);
+                    currentPath = nodePath;
+                }
+
+                // 将选项添加到最后一个菜单节点
+                if (parentNode) {
+                    parentNode.children.push(option);
                 }
             }
-            
-            // 返回根节点的列表
-            return Object.values(tree);
+
+            return rootNodes;
         });
 
         // --- 生命周期函数 ---
-        onMounted(() => {
-            // 在生产中:
-            // fetch('./menu.json').then(res => res.json()).then(data => {
-            //     allOptions.value = data;
-            //     initializeConfigState(data);
-            // });
-            
-            // 开发中 (使用模拟数据):
-            allOptions.value = MOCK_MENU_JSON;
-            initializeConfigState(MOCK_MENU_JSON);
+        onMounted(async () => {
+            try {
+                const response = await fetch('./menu.json');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const data = await response.json();
+                allOptions.value = data;
+                initializeConfigState(data);
+                loading.value = false;
+            } catch (err) {
+                error.value = `无法加载 menu.json: ${err.message}`;
+                loading.value = false;
+                console.error('Failed to load menu.json:', err);
+            }
         });
 
         // --- 方法 (Methods) ---
         function initializeConfigState(options) {
             const state = {};
             for (const opt of options) {
-                // 在这里可以设置默认值 (来自 opt.default)
-                // 为简单起见, 先都设为 false
-                state[opt.id] = false;
+                // 使用默认值或 false
+                if (opt.default && opt.default.length > 0) {
+                    const defaultValue = opt.default[0];
+                    state[opt.id] = (defaultValue === 'y' || defaultValue === 'Y');
+                } else {
+                    state[opt.id] = false;
+                }
             }
             configState.value = state;
         }
 
-        // 核心逻辑: 检查一个选项是否应该被禁用
+        /**
+         * 核心逻辑: 检查一个选项是否应该被禁用
+         * 使用 Kconfig 表达式解析器来求值依赖
+         */
         function isItemDisabled(node) {
-            // 这是一个极简的依赖解析, 仅用于演示
-            // 它只检查一个依赖项
-            if (node.depends_on && !configState.value[node.depends_on]) {
-                return true; // 依赖项未被选中, 禁用
+            if (!node.depends_on || node.depends_on === '' || node.depends_on === 'y') {
+                return false;
             }
-            return false;
+            
+            const parser = new KconfigExpressionParser(configState.value);
+            return !parser.evaluate(node.depends_on);
         }
 
-        // 提交到后端
+        /**
+         * 检查一个选项是否被锁定（自动选择）
+         */
+        function isItemLocked(node) {
+            return lockedSelections.value.has(node.id);
+        }
+
+        /**
+         * 处理 "selects" 逻辑
+         * 当一个选项被启用时，自动启用它 selects 的所有选项
+         */
+        function processSelects() {
+            const newLockedSelections = new Set();
+            
+            // 遍历所有选项
+            for (const option of allOptions.value) {
+                // 如果这个选项被启用
+                if (configState.value[option.id] === true) {
+                    // 自动启用它 selects 的所有选项
+                    if (option.selects && Array.isArray(option.selects)) {
+                        for (const selectedId of option.selects) {
+                            if (configState.value[selectedId] !== undefined) {
+                                configState.value[selectedId] = true;
+                                newLockedSelections.add(selectedId);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            lockedSelections.value = newLockedSelections;
+        }
+
+        /**
+         * 监听 configState 的变化，自动处理 selects
+         */
+        watch(
+            () => configState.value,
+            () => {
+                processSelects();
+            },
+            { deep: true }
+        );
+
+        /**
+         * 获取仅包含启用选项的配置
+         */
+        function getActiveConfig() {
+            const active = {};
+            for (const key in configState.value) {
+                if (configState.value[key]) {
+                    active[key] = true;
+                }
+            }
+            return active;
+        }
+
+        /**
+         * 提交到后端生成配置文件
+         */
         async function generateConfig() {
             console.log("正在生成配置:", configState.value);
             
@@ -182,11 +496,20 @@ const app = createApp({
             }
         }
 
+        // 使用 provide 将状态和方法传递给子组件
+        provide('configState', configState);
+        provide('isItemDisabled', isItemDisabled);
+        provide('isItemLocked', isItemLocked);
+
         return {
+            loading,
+            error,
             configState,
             menuTree,
             isItemDisabled,
-            generateConfig
+            isItemLocked,
+            generateConfig,
+            getActiveConfig
         };
     }
 });
@@ -198,14 +521,16 @@ app.component('menu-tree', {
     name: 'menu-tree',
     props: ['nodes'],
     template: '#menu-tree-template',
-    // 在组件内部也需要访问全局状态和方法
     setup() {
-        // 从父组件注入 (或者使用 Pinia)
-        // 这是一个简化的方法, 假设 configState 和 isItemDisabled 在根组件上
-        const root = app._instance.setupState; 
+        // 从父组件注入状态和方法
+        const configState = inject('configState');
+        const isItemDisabled = inject('isItemDisabled');
+        const isItemLocked = inject('isItemLocked');
+        
         return {
-            configState: root.configState,
-            isItemDisabled: root.isItemDisabled
+            configState,
+            isItemDisabled,
+            isItemLocked
         };
     }
 });
