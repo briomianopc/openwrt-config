@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  openwrt-config-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openwrt-config-generator
+    ports:
+      - "5000:5000"
+    volumes:
+      # 挂载 OpenWrt 源码目录（必须）
+      # 请修改左侧路径为您的 OpenWrt 源码目录
+      - /path/to/your/openwrt:/mnt/openwrt_source:ro
+      
+      # 可选：挂载生成的 menu.json（用于持久化）
+      - ./menu.json:/app/menu.json
+      
+      # 可选：挂载前端文件（用于开发）
+      # - ./index.html:/app/index.html
+    environment:
+      - OPENWRT_SRC_PATH=/mnt/openwrt_source
+      - STATIC_DIR=/app
+      - OUTPUT_JSON_PATH=/app/menu.json
+      - PORT=5000
+      - DEBUG=False
+      - CORS_ORIGINS=*
+    restart: unless-stopped
+    networks:
+      - openwrt-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  openwrt-network:
+    driver: bridge

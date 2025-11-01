@@ -1,16 +1,17 @@
 import json
 import os
 import sys
+import argparse
 from kconfiglib import Kconfig
 
 # --- 配置 ---
-# 指向您准备好的 OpenWrt 源码根目录
-OPENWRT_SRC_PATH = "/mnt/openwrt_source"
+# 从环境变量读取 OpenWrt 源码路径，提供默认值
+OPENWRT_SRC_PATH = os.environ.get("OPENWRT_SRC_PATH", "/mnt/openwrt_source")
 # Kconfiglib 需要这个根 Kconfig 文件
 ROOT_KCONFIG = os.path.join(OPENWRT_SRC_PATH, "Kconfig")
 
 # 输出的 JSON 文件, 将给前端使用
-OUTPUT_JSON = "menu.json"
+OUTPUT_JSON = os.environ.get("OUTPUT_JSON_PATH", "menu.json")
 
 def serialize_symbol(sym):
     """
@@ -64,19 +65,56 @@ def get_menu_path(sym):
     return list(reversed(path)) # 反转得到 "根 -> 叶" 的路径
 
 def main():
-    print(f"Loading Kconfig from: {ROOT_KCONFIG}")
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description='Parse OpenWrt Kconfig and generate menu.json'
+    )
+    parser.add_argument(
+        '--src-path',
+        default=OPENWRT_SRC_PATH,
+        help=f'Path to OpenWrt source directory (default: {OPENWRT_SRC_PATH})'
+    )
+    parser.add_argument(
+        '--output',
+        default=OUTPUT_JSON,
+        help=f'Output JSON file path (default: {OUTPUT_JSON})'
+    )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose output'
+    )
+    
+    args = parser.parse_args()
+    
+    src_path = args.src_path
+    output_path = args.output
+    root_kconfig = os.path.join(src_path, "Kconfig")
+    
+    # 检查源码目录是否存在
+    if not os.path.exists(src_path):
+        print(f"Error: OpenWrt source directory not found: {src_path}", file=sys.stderr)
+        print("Please set OPENWRT_SRC_PATH environment variable or use --src-path", file=sys.stderr)
+        sys.exit(1)
+    
+    if not os.path.exists(root_kconfig):
+        print(f"Error: Kconfig file not found: {root_kconfig}", file=sys.stderr)
+        print("Please ensure you have a valid OpenWrt source tree", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"Loading Kconfig from: {root_kconfig}")
     
     # Kconfiglib 需要一些环境变量来正确解析, 就像 'make menuconfig' 一样
     # 我们需要模拟它们。最重要的是 TOPDIR。
-    os.environ["TOPDIR"] = OPENWRT_SRC_PATH
+    os.environ["TOPDIR"] = src_path
     
     try:
         # warn_to_stderr=False 避免在解析 feeds 时产生过多噪音
-        kconf = Kconfig(ROOT_KCONFIG, warn_to_stderr=False)
+        kconf = Kconfig(root_kconfig, warn_to_stderr=args.verbose)
     except Exception as e:
         print(f"Error loading Kconfig: {e}", file=sys.stderr)
-        print("Tip: Did you run './scripts/feeds update -a' and 'install -a'?", file=sys.stderr)
-        return
+        print("Tip: Did you run './scripts/feeds update -a' and './scripts/feeds install -a'?", file=sys.stderr)
+        sys.exit(1)
 
     print("Kconfig loaded. Parsing all symbols...")
     
@@ -91,11 +129,17 @@ def main():
 
     # 写入 JSON 文件
     try:
-        with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
+        # 确保输出目录存在
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(all_options, f, indent=2, ensure_ascii=False)
-        print(f"Successfully generated {OUTPUT_JSON}")
+        print(f"Successfully generated {output_path}")
     except Exception as e:
         print(f"Error writing JSON: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
