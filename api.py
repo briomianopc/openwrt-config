@@ -2,91 +2,217 @@ import os
 import subprocess
 import tempfile
 import re
-from flask import Flask, request, send_file, jsonify
-from flask_cors import CORS # 处理跨域请求
+import shutil
+import logging
+from pathlib import Path
+from flask import Flask, request, send_file, jsonify, send_from_directory
+from flask_cors import CORS
+from threading import Lock
+
+# --- 配置日志 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # --- 配置 ---
-OPENWRT_SRC_PATH = "/mnt/openwrt_source"
+# 从环境变量读取配置，提供默认值
+OPENWRT_SRC_PATH = os.environ.get("OPENWRT_SRC_PATH", "/mnt/openwrt_source")
+STATIC_DIR = os.environ.get("STATIC_DIR", os.path.dirname(os.path.abspath(__file__)))
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*")
+DEBUG_MODE = os.environ.get("DEBUG", "False").lower() in ('true', '1', 'yes')
+
+# 用于防止并发 make defconfig 冲突的锁
+config_lock = Lock()
 
 # --- Flask App ---
-app = Flask(__name__)
-# 允许来自任何源的 /generate-config 请求 (在开发中方便)
-CORS(app, resources={r"/generate-config": {"origins": "*"}})
+app = Flask(__name__, static_folder=STATIC_DIR)
+
+# 配置 CORS
+if CORS_ORIGINS == "*":
+    CORS(app)
+else:
+    CORS(app, resources={r"/*": {"origins": CORS_ORIGINS.split(',')}})
+
+# --- 静态文件路由 ---
+@app.route('/')
+def index():
+    """返回主页"""
+    try:
+        return send_from_directory(STATIC_DIR, 'index.html')
+    except Exception as e:
+        logger.error(f"Failed to serve index.html: {e}")
+        return jsonify({"error": "index.html not found"}), 404
+
+@app.route('/menu.json')
+def menu_json():
+    """返回配置菜单 JSON"""
+    try:
+        return send_from_directory(STATIC_DIR, 'menu.json')
+    except Exception as e:
+        logger.error(f"Failed to serve menu.json: {e}")
+        return jsonify({"error": "menu.json not found. Please run parse_kconfig.py first."}), 404
+
+@app.route('/health')
+def health_check():
+    """健康检查端点"""
+    return jsonify({
+        "status": "healthy",
+        "openwrt_src_exists": os.path.exists(OPENWRT_SRC_PATH),
+        "menu_json_exists": os.path.exists(os.path.join(STATIC_DIR, 'menu.json'))
+    })
 
 @app.route('/generate-config', methods=['POST'])
 def generate_config():
     """
     API 端点：接收前端的选项, 生成并返回 .config 文件
     """
-    try:
-        # 1. 获取前端发送的 JSON 数据
-        # 格式: {"CONFIG_TARGET_x86_64": "y", "CONFIG_PACKAGE_luci": "y"}
-        user_options = request.json
-        if not user_options:
-            return jsonify({"error": "No options provided"}), 400
-
-        # 2. 在 OpenWrt 源码目录中创建一个临时的 .config
-        # (使用临时文件更安全, 但在源码树中操作更简单)
-        config_path = os.path.join(OPENWRT_SRC_PATH, ".config")
+    # 检查 OpenWrt 源码目录
+    if not os.path.exists(OPENWRT_SRC_PATH):
+        logger.error(f"OpenWrt source directory not found: {OPENWRT_SRC_PATH}")
+        return jsonify({
+            "error": "OpenWrt source directory not found",
+            "details": f"Please ensure OPENWRT_SRC_PATH is set correctly: {OPENWRT_SRC_PATH}"
+        }), 500
+    
+    # 使用锁防止并发冲突
+    with config_lock:
+        temp_dir = None
+        try:
+            # 1. 获取前端发送的 JSON 数据
+            user_options = request.json
+            if not user_options:
+                return jsonify({"error": "No options provided"}), 400
             
-        print(f"Generating .config in {config_path}")
+            logger.info(f"Received {len(user_options)} configuration options")
+
+            # 2. 创建临时工作目录
+            temp_dir = tempfile.mkdtemp(prefix='openwrt_config_')
+            logger.info(f"Created temporary directory: {temp_dir}")
             
-        with open(config_path, 'w', encoding='utf-8') as f:
-            # 写入一个基础的 "defconfig" (可选, 但推荐)
-            f.write("# Base config\n")
+            # 复制必要的文件到临时目录（可选，取决于 OpenWrt 构建系统）
+            # 这里我们直接在源码树中操作，但使用更安全的方式
             
-            for key, value in user_options.items():
-                # 安全检查: 确保是合法的Kconfig键
-                if re.match(r'^CONFIG_[\w_]+$', key):
-                    # 写入用户选择
-                    if value == 'y':
-                         f.write(f"{key}=y\n")
-                    # (生产环境还需处理 string 和 int)
-                    elif isinstance(value, str):
-                        f.write(f'{key}="{value}"\n')
-                    elif isinstance(value, (int, float)):
-                        f.write(f'{key}={value}\n')
-                else:
-                    print(f"Skipping invalid key: {key}")
+            config_path = os.path.join(OPENWRT_SRC_PATH, ".config")
+            backup_path = config_path + ".backup"
+            
+            # 备份现有的 .config（如果存在）
+            if os.path.exists(config_path):
+                shutil.copy2(config_path, backup_path)
+                logger.info("Backed up existing .config")
+            
+            # 3. 写入用户配置
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write("# OpenWrt Configuration\n")
+                f.write("# Generated by OpenWrt Config Generator\n\n")
+                
+                for key, value in user_options.items():
+                    # 安全检查: 确保是合法的Kconfig键
+                    if re.match(r'^CONFIG_[\w_]+$', key):
+                        if value == 'y' or value == 'Y':
+                            f.write(f"{key}=y\n")
+                        elif value == 'n' or value == 'N':
+                            f.write(f"# {key} is not set\n")
+                        elif value == 'm' or value == 'M':
+                            f.write(f"{key}=m\n")
+                        elif isinstance(value, str) and value not in ('y', 'n', 'm'):
+                            # 字符串值需要引号
+                            f.write(f'{key}="{value}"\n')
+                        elif isinstance(value, (int, float)):
+                            f.write(f'{key}={value}\n')
+                    else:
+                        logger.warning(f"Skipping invalid config key: {key}")
 
-        # 3. 【最关键的步骤】
-        # 在 OpenWrt 源码目录中, 运行 'make defconfig'
-        # 它会读取我们刚写入的 .config, 并自动计算所有必需的依赖项！
+            # 4. 运行 make defconfig 解析依赖
+            logger.info(f"Running 'make defconfig' in {OPENWRT_SRC_PATH}")
+            
+            env = os.environ.copy()
+            env["TOPDIR"] = OPENWRT_SRC_PATH
+            env["DEBIAN_FRONTEND"] = "noninteractive"
+            
+            process = subprocess.run(
+                ['make', 'defconfig'],
+                cwd=OPENWRT_SRC_PATH,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120  # 120秒超时
+            )
+
+            if process.returncode != 0:
+                logger.error(f"make defconfig failed: {process.stderr}")
+                # 恢复备份
+                if os.path.exists(backup_path):
+                    shutil.move(backup_path, config_path)
+                return jsonify({
+                    "error": "Failed to resolve dependencies",
+                    "details": process.stderr
+                }), 500
+
+            logger.info("make defconfig completed successfully")
+
+            # 5. 将生成的 .config 复制到临时文件
+            result_config = os.path.join(temp_dir, "result.config")
+            shutil.copy2(config_path, result_config)
+            
+            # 恢复备份（如果存在）
+            if os.path.exists(backup_path):
+                shutil.move(backup_path, config_path)
+                logger.info("Restored original .config")
+            else:
+                # 如果没有备份，删除我们创建的 .config
+                os.remove(config_path)
+
+            # 6. 返回生成的配置文件
+            return send_file(
+                result_config,
+                as_attachment=True,
+                download_name=".config",
+                mimetype="text/plain"
+            )
+
+        except subprocess.TimeoutExpired:
+            logger.error("make defconfig timed out")
+            return jsonify({"error": "Configuration generation timed out"}), 500
         
-        print(f"Running 'make defconfig' in {OPENWRT_SRC_PATH}...")
+        except Exception as e:
+            logger.exception(f"Error generating config: {e}")
+            return jsonify({"error": str(e)}), 500
         
-        # 环境变量, 告诉 make 我们在 "non-interactive" 模式
-        env = os.environ.copy()
-        env["TOPDIR"] = OPENWRT_SRC_PATH
-        env["DEBIAN_FRONTEND"] = "noninteractive" # 避免卡住
-        
-        process = subprocess.run(
-            ['make', 'defconfig'],
-            cwd=OPENWRT_SRC_PATH,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60 # 60秒超时
-        )
-
-        if process.returncode != 0:
-            print("Error running 'make defconfig':", process.stderr)
-            return jsonify({"error": "Failed to resolve dependencies", "details": process.stderr}), 500
-
-        print("'make defconfig' successful.")
-
-        # 4. 将最终生成的、包含所有依赖的 .config 文件发送给用户
-        # 'make defconfig' 会覆盖我们传入的 .config 文件
-        return send_file(
-            config_path,
-            as_attachment=True,
-            download_name=".config",
-            mimetype="text/plain"
-        )
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return jsonify({"error": str(e)}), 500
+        finally:
+            # 清理临时目录
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info(f"Cleaned up temporary directory: {temp_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp directory: {e}")
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # 启动前检查
+    logger.info("=" * 60)
+    logger.info("OpenWrt Config Generator API Server")
+    logger.info("=" * 60)
+    logger.info(f"OpenWrt Source Path: {OPENWRT_SRC_PATH}")
+    logger.info(f"Static Directory: {STATIC_DIR}")
+    logger.info(f"CORS Origins: {CORS_ORIGINS}")
+    logger.info(f"Debug Mode: {DEBUG_MODE}")
+    
+    if not os.path.exists(OPENWRT_SRC_PATH):
+        logger.warning(f"WARNING: OpenWrt source not found at {OPENWRT_SRC_PATH}")
+        logger.warning("Config generation will fail until source is available")
+    
+    menu_json_path = os.path.join(STATIC_DIR, 'menu.json')
+    if not os.path.exists(menu_json_path):
+        logger.warning(f"WARNING: menu.json not found at {menu_json_path}")
+        logger.warning("Please run: python parse_kconfig.py")
+    
+    logger.info("=" * 60)
+    
+    # 启动 Flask 应用
+    app.run(
+        debug=DEBUG_MODE,
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', 5000))
+    )
